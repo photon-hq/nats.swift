@@ -83,6 +83,100 @@ final class HandshakeTests: XCTestCase {
         }
     }
 
+    func testMessagesAfterHandshakePongUseNormalProcessing() async throws {
+        let awaitingPong = expectation(description: "handshake awaits PONG")
+        let replied = expectation(description: "server PING receives PONG")
+        let server = try await makePeer(
+            onConnect: { channel in
+                channel.writeAndFlush(channel.allocator.buffer(string: Self.info), promise: nil)
+            },
+            onRead: { _, line in
+                if line == "PING" { awaitingPong.fulfill() }
+                if line == "PONG" { replied.fulfill() }
+            })
+        let client = NatsClientOptions().url(server.url).build()
+        clients.append(client)
+        let handler = try XCTUnwrap(client.connectionHandler)
+        let receivedInfo = NIOLockedValueBox(false)
+        let receivedError = NIOLockedValueBox(false)
+        let listener = client.on(.lameDuckMode) { _ in
+            XCTAssertNotNil(handler.batchBuffer, "Normal writes must be ready at protocol handoff")
+            receivedInfo.withLockedValue { $0 = true }
+        }
+        defer { client.off(listener) }
+        client.on(.error) { event in
+            guard case .error(let error) = event else { return }
+            XCTAssertEqual(error as? NatsError.ServerError, .authenticationTimeout)
+            receivedError.withLockedValue { $0 = true }
+        }
+        let connected = expectation(description: "handshake completes")
+        tasks.append(
+            Task {
+                defer { connected.fulfill() }
+                do {
+                    try await client.connect()
+                } catch {
+                    XCTFail("Connect failed: \(error)")
+                }
+            })
+        await fulfillment(of: [awaitingPong], timeout: 2)
+
+        let channel = try XCTUnwrap(handler.channel)
+        let info = Self.info.replacingOccurrences(
+            of: "\"proto\":1", with: "\"proto\":1,\"ldm\":true")
+        // Feed one read batch so TCP packet splitting cannot hide the protocol boundary.
+        try await channel.eventLoop.submit {
+            let messages = "PONG\r\n" + info + "-ERR 'Authentication Timeout'\r\nPING\r\n"
+            channel.pipeline.syncOperations.fireChannelRead(
+                NIOAny(channel.allocator.buffer(string: messages)))
+            channel.pipeline.fireChannelReadComplete()
+            XCTAssertTrue(
+                receivedInfo.withLockedValue { $0 }, "Post-PONG INFO must not be swallowed")
+            XCTAssertTrue(
+                receivedError.withLockedValue { $0 }, "Post-PONG -ERR must not be swallowed")
+        }.get()
+
+        await fulfillment(of: [connected, replied], timeout: 2)
+    }
+
+    func testHandshakeErrorCannotBeOverriddenByPong() async throws {
+        let awaitingPong = expectation(description: "handshake awaits PONG")
+        let server = try await makePeer(
+            onConnect: { channel in
+                channel.writeAndFlush(channel.allocator.buffer(string: Self.info), promise: nil)
+            },
+            onRead: { _, line in
+                if line == "PING" { awaitingPong.fulfill() }
+            })
+        let client = NatsClientOptions().url(server.url).build()
+        clients.append(client)
+        let handler = try XCTUnwrap(client.connectionHandler)
+        client.on(.connected) { _ in XCTFail("A failed handshake must not connect") }
+        let finished = expectation(description: "handshake preserves the original rejection")
+        tasks.append(
+            Task {
+                defer { finished.fulfill() }
+                do {
+                    try await client.connect()
+                    XCTFail("Expected authentication timeout")
+                } catch {
+                    XCTAssertEqual(error as? NatsError.ServerError, .authenticationTimeout)
+                }
+            })
+        await fulfillment(of: [awaitingPong], timeout: 2)
+
+        let channel = try XCTUnwrap(handler.channel)
+        try await channel.eventLoop.submit {
+            let messages = "-ERR 'Authentication Timeout'\r\nPONG\r\n"
+            channel.pipeline.syncOperations.fireChannelRead(
+                NIOAny(channel.allocator.buffer(string: messages)))
+            channel.pipeline.fireChannelReadComplete()
+            XCTAssertNil(handler.batchBuffer, "A rejected handshake must not enable normal writes")
+        }.get()
+
+        await fulfillment(of: [finished], timeout: 2)
+    }
+
     func testSilentHandshakeTimesOut() async throws {
         for greeting in ["", Self.info] {
             let server = try await makePeer(

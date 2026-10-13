@@ -101,13 +101,13 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
     private struct Handshake: Sendable {
         let info: EventLoopPromise<ServerInfo>
         let upgraded: EventLoopPromise<Void>
-        let established: EventLoopPromise<Void>
+        let established: EventLoopPromise<Channel>
         let channel = NIOLockedValueBox<Channel?>(nil)
 
         init(eventLoop: EventLoop) {
             info = eventLoop.makePromise(of: ServerInfo.self)
             upgraded = eventLoop.makePromise(of: Void.self)
-            established = eventLoop.makePromise(of: Void.self)
+            established = eventLoop.makePromise(of: Channel.self)
             upgraded.futureResult.cascadeFailure(to: established)
         }
 
@@ -219,7 +219,7 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
                     continue
                 case .pong:
                     self.outstandingPings.store(0, ordering: .relaxed)
-                    handshake.established.succeed(())
+                    handshake.established.succeed(context.channel)
                     continue
                 case .ping:
                     context.channel.writeAndFlush(
@@ -456,6 +456,12 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
         self.handshake.withLockedValue { $0 = handshake }
         defer { self.handshake.withLockedValue { $0 = nil } }
 
+        let established = handshake.established.futureResult.map { channel in
+            // Hand off on the event loop before processing any messages following PONG.
+            self.batchBuffer = BatchBuffer(channel: channel)
+            self.handshake.withLockedValue { $0 = nil }
+        }
+
         let setup = Task {
             do {
                 try Task.checkCancellation()
@@ -521,7 +527,7 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
 
         do {
             try await withTaskCancellationHandler {
-                try await handshake.established.futureResult.get()
+                try await established.get()
                 await setup.value
                 try Task.checkCancellation()
             } onCancel: {
@@ -532,7 +538,6 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
             guard let channel = handshake.channel.withLockedValue({ $0 }), channel.isActive else {
                 throw NatsError.ClientError.connectionClosed
             }
-            self.batchBuffer = BatchBuffer(channel: channel)
             self.connectedUrl = s
         } catch {
             handshake.fail(error)
