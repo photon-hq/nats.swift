@@ -167,6 +167,7 @@ extension NatsClient {
     /// > **Throws:**
     /// >  - ``NatsError/ClientError/connectionClosed`` if the conneciton is closed.
     /// >  - ``NatsError/ClientError/io(_:)`` if there is an error writing message to a TCP socket (e.g. bloken pipe).
+    /// >  - ``NatsError/ClientError/maxPayloadExceeded`` if the message is larger than the server allows.
     public func publish(
         _ payload: Data, subject: String, reply: String? = nil, headers: NatsHeaderMap? = nil
     ) async throws {
@@ -177,6 +178,7 @@ extension NatsClient {
         if case .closed = connectionHandler.currentState {
             throw NatsError.ClientError.connectionClosed
         }
+        try connectionHandler.checkPayloadSize(payload, headers: headers)
         try await connectionHandler.write(
             operation: ClientOp.publish((subject, reply, payload, headers)))
     }
@@ -196,6 +198,7 @@ extension NatsClient {
     /// >  - ``NatsError/ClientError/io(_:)`` if there is an error writing message to a TCP socket (e.g. bloken pipe).
     /// >  - ``NatsError/RequestError/noResponders`` if there are no responders available for the request.
     /// >  - ``NatsError/RequestError/timeout`` if there was a timeout waiting for the response.
+    /// >  - ``NatsError/ClientError/maxPayloadExceeded`` if the request is larger than the server allows.
     public func request(
         _ payload: Data, subject: String, headers: NatsHeaderMap? = nil, timeout: TimeInterval = 5
     ) async throws -> NatsMessage {
@@ -206,6 +209,7 @@ extension NatsClient {
         if case .closed = connectionHandler.currentState {
             throw NatsError.ClientError.connectionClosed
         }
+        try connectionHandler.checkPayloadSize(payload, headers: headers)
         let inbox = newInbox()
 
         let sub = try await connectionHandler.subscribe(inbox)

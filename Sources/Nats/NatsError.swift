@@ -149,6 +149,7 @@ public enum NatsError {
         case invalidConnection(String)
         case cancelled
         case alreadyConnected
+        case maxPayloadExceeded
 
         public var description: String {
             switch self {
@@ -166,6 +167,8 @@ public enum NatsError {
                 return "nats: operation cancelled"
             case .alreadyConnected:
                 return "nats: client is already connected or connecting"
+            case .maxPayloadExceeded:
+                return "nats: maximum payload exceeded"
             }
         }
     }
