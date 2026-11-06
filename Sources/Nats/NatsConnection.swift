@@ -976,6 +976,17 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
         try await write(operation: ClientOp.unsubscribe((sid: sid, max: max - receivedSoFar)))
     }
 
+    /// The server closes the connection on a message above its limit, so check it before writing.
+    func checkPayloadSize(_ payload: Data, headers: NatsHeaderMap?) throws {
+        guard let maxPayload = serverInfo?.maxPayload else {
+            return
+        }
+        let size = payload.count + (headers?.toBytes().count ?? 0)
+        if UInt(size) > maxPayload {
+            throw NatsError.ClientError.maxPayloadExceeded
+        }
+    }
+
     func write(operation: ClientOp) async throws {
         guard let buffer = self.batchBuffer else {
             throw NatsError.ClientError.invalidConnection("not connected")

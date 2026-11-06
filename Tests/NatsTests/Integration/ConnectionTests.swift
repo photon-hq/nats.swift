@@ -53,6 +53,7 @@ class CoreNatsTests: XCTestCase {
         ("testConcurrentChannelActiveAndRead", testConcurrentChannelActiveAndRead),
         ("testRequest_timeout", testRequest_timeout),
         ("testPublishOnClosedConnection", testPublishOnClosedConnection),
+        ("testPublishAboveMaxPayload", testPublishAboveMaxPayload),
         ("testCloseClosedConnection", testCloseClosedConnection),
         ("testSuspendClosedConnection", testSuspendClosedConnection),
         ("testReconnectOnClosedConnection", testReconnectOnClosedConnection),
@@ -1017,6 +1018,37 @@ class CoreNatsTests: XCTestCase {
             XCTFail("Expected connection closed error; got: \(error)")
         }
         XCTFail("Expected connection closed error")
+    }
+
+    func testPublishAboveMaxPayload() async throws {
+        natsServer.start()
+        logger.logLevel = .critical
+        let client = NatsClientOptions()
+            .url(URL(string: natsServer.clientURL)!)
+            .build()
+        try await client.connect()
+        // The server's default limit.
+        let maxPayload = 1024 * 1024
+        let sub = try await client.subscribe(subject: "test")
+
+        do {
+            try await client.publish(Data(count: maxPayload + 1), subject: "test")
+            XCTFail("Expected max payload exceeded error")
+        } catch NatsError.ClientError.maxPayloadExceeded {}
+
+        // Headers count toward the limit.
+        var headers = NatsHeaderMap()
+        headers.append(try! NatsHeaderName("foo"), NatsHeaderValue("bar"))
+        do {
+            _ = try await client.request(Data(count: maxPayload), subject: "test", headers: headers)
+            XCTFail("Expected max payload exceeded error")
+        } catch NatsError.ClientError.maxPayloadExceeded {}
+
+        // The connection stays open for messages within the limit.
+        try await client.publish(Data(count: maxPayload), subject: "test")
+        let msg = try await sub.makeAsyncIterator().next()
+        XCTAssertEqual(msg?.payload?.count, maxPayload)
+        try await client.close()
     }
 
     func testCloseClosedConnection() async throws {
